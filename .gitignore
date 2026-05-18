@@ -220,3 +220,7 @@ __marimo__/
 # Custom
 # Additional files or directories that should be ignored by Git here.
 draft.py
+data/processed/*
+!data/processed/.gitkeep
+!data/raw/
+!data/raw/**
