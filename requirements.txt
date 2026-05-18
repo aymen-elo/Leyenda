@@ -6,3 +6,4 @@ matplotlib==3.7.2
 imageio==2.31.3
 Pillow==10.0.0
 scipy==1.11.2
+python-dotenv

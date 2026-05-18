@@ -216,3 +216,7 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Custom
+# Additional files or directories that should be ignored by Git here.
+draft.py

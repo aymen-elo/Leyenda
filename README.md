@@ -10,3 +10,9 @@ python -m venv .venv
 
 pip install -r requirements.txt
 ```
+
+Create a .env file in the project root with your local data path:
+
+```env
+DATA_PATH=C:\path\to\your\data
+```
