@@ -3,13 +3,13 @@
 This folder contains local project data organized by processing stage.
 
 ## `raw/`
-`raw/` stores the original, unmodified input data.
+stores the original, unmodified input data.
 
-- Source-of-truth and must remain immutable (do not edit in place)
-- If the full dataset is large, it can live outside the repository and be referenced via `DATA_PATH`
-
+- **In-repo sample:** A small subset (N images per class) for quick tests
+- **Full dataset:** Lives externally, referenced via `DATA_PATH` environment variable
+- Never edit these files in place
 ## `processed/`
-`processed/` stores data generated from `raw/` after deterministic transformations.
+stores data generated from `raw/` after deterministic transformations.
 
 Examples:
 - denoised images
