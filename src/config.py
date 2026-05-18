@@ -11,3 +11,12 @@ class Config:
     RESULTS_PATH = BASE_DIR / "notebooks/figures"
 
     RANDOM_SEED = 42
+
+    @staticmethod
+    def get_raw_data_path(mode="full"):
+        if mode == "full":
+            return Config.DATA_PATH / "raw"
+        elif mode == "sample":
+            return Config.BASE_DIR / "data" / "raw"
+        else:
+            raise ValueError(f"Unknown mode: {mode}")
