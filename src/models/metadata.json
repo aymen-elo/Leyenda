@@ -1,0 +1,30 @@
+{
+  "project": "Leyenda \u2014 Livrable 2",
+  "group": "Groupe 3",
+  "threshold": 0.5,
+  "image_size": [
+    224,
+    224
+  ],
+  "classes": {
+    "0": "Not_Photo",
+    "1": "Photo"
+  },
+  "sort_summary": {
+    "n_photo": 10,
+    "n_not_photo": 40,
+    "errors": 0
+  },
+  "models": {
+    "cnn_scratch": {
+      "val_accuracy": 0.7,
+      "auc": 0.8095238095238095
+    },
+    "mobilenetv2": {
+      "val_accuracy": 0.8,
+      "auc": 0.9047619047619048,
+      "architecture": "MobileNetV2 ImageNet + custom head"
+    }
+  },
+  "best_model": "MobileNetV2_Binary"
+}
