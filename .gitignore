@@ -224,3 +224,13 @@ data/processed/*
 !data/processed/.gitkeep
 !data/raw/
 !data/raw/**
+
+# Livrable 3 - donnees MS COCO volumineuses (ne pas committer, ~1.3 Go)
+data/raw/train2014/
+data/raw/annotations/
+data/raw/subset_8000.csv
+# Features CNN pre-extraites et modeles entraines
+features/*.npy
+src/models/*.keras
+src/models/*.pkl
+notebooks/*.keras
