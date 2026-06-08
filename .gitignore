@@ -224,3 +224,4 @@ data/processed/*
 !data/processed/.gitkeep
 !data/raw/
 !data/raw/**
+notebooks/draft.ipynb
