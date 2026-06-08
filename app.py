@@ -1,557 +1,608 @@
+# -*- coding: utf-8 -*-
 """
 Projet Leyenda - Pipeline TouNum
-================================
-Interface de demonstration Streamlit pour la soutenance.
+Interface de demonstration : classification -> debruitage -> captioning.
 
-Pipeline complet sur des images inconnues :
-    L1  Classification  (Photo / Non-Photo)   -> src/models/cnn_scratch.keras    (optionnel)
-    L2  Debruitage      (U-Net)               -> notebooks/unet_model.keras
-    L3  Captioning      (InceptionV3 + LSTM)   -> src/models/captioning_model.keras + tokenizer
-
-La logique de generation de legende est adaptee de
-    notebooks/livrable3_captioning.ipynb  (generate_caption, encodeur InceptionV3, tokenizer).
-
-Lancement :  streamlit run app.py    (ou double-clic sur run_demo.bat)
+NOTE pour Matisse :
+Ce fichier ne change RIEN a la logique IA. Toute la partie "metier"
+(chargement des modeles, generate_caption, InceptionV3, tokenizer) est
+isolee dans la section LOGIQUE METIER. Si tes noms de fichiers/fonctions
+different, ce sont les SEULS endroits a ajuster -> cherche les balises
+[A VERIFIER].
 """
 
-import io
 import os
 import time
-from pathlib import Path
+import io
 
 import numpy as np
 import streamlit as st
 from PIL import Image
 
-# ---------------------------------------------------------------------------
-# CONFIGURATION & CHEMINS
-# ---------------------------------------------------------------------------
-PROJECT_ROOT = Path(__file__).resolve().parent
-MODELS_DIR   = PROJECT_ROOT / "src" / "models"
+# Imports TF gardes paresseux pour ne pas ralentir le 1er affichage.
+import tensorflow as tf
+import pickle
 
-L1_MODEL_PATH = MODELS_DIR / "cnn_scratch.keras"               # Classification  (peut etre absent)
-L2_MODEL_PATH = PROJECT_ROOT / "notebooks" / "unet_model.keras"  # Debruitage
-L3_MODEL_PATH = MODELS_DIR / "captioning_model.keras"          # Captioning
-TOKENIZER_PKL = MODELS_DIR / "captioning_tokenizer.pkl"
-
-# Hyperparametres encodeur (coherents avec le livrable 3)
-IMG_SIZE   = 299      # taille d'entree InceptionV3
-L1_SIZE    = 224      # taille d'entree du classifieur L1
-L2_SIZE    = 256      # taille d'entree de l'U-Net L2
-PAD_TOK, START_TOK, END_TOK, UNK_TOK = "<pad>", "<start>", "<end>", "<unk>"
-
-EXTS = (".jpg", ".jpeg", ".png", ".bmp", ".gif", ".tif", ".tiff", ".webp")
-
-# Palette TouNum : bleu nuit + accents ambre/orange
-C_BG       = "#0e1525"
-C_CARD     = "#161f33"
-C_AMBER    = "#f5a623"
-C_ORANGE   = "#ff7a18"
-C_GREEN    = "#2ecc71"
-C_RED      = "#e74c3c"
-C_TEXT     = "#e8edf6"
-C_MUTED    = "#8a97ad"
-
+# =============================================================================
+# CONFIG PAGE  (doit etre le tout premier appel Streamlit)
+# =============================================================================
 st.set_page_config(
-    page_title="Projet Leyenda - TouNum",
-    page_icon="🖼️",
+    page_title="Leyenda - Pipeline TouNum",
+    page_icon="🛰️",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
-# ---------------------------------------------------------------------------
-# THEME SOMBRE (CSS)
-# ---------------------------------------------------------------------------
-st.markdown(
-    f"""
-    <style>
-    .stApp {{
-        background: radial-gradient(1200px 600px at 20% -10%, #16223d 0%, {C_BG} 55%);
-        color: {C_TEXT};
-    }}
-    section[data-testid="stSidebar"] {{
-        background: linear-gradient(180deg, #101a30 0%, #0b1222 100%);
-        border-right: 1px solid #22304d;
-    }}
-    h1, h2, h3, h4 {{ color: {C_TEXT}; letter-spacing: .3px; }}
-    .ly-title {{
-        font-size: 2.2rem; font-weight: 800; margin-bottom: .1rem;
-        background: linear-gradient(90deg, {C_AMBER}, {C_ORANGE});
-        -webkit-background-clip: text; -webkit-text-fill-color: transparent;
-    }}
-    .ly-sub {{ color: {C_MUTED}; font-size: 1.02rem; margin-top: 0; }}
-    .ly-card {{
-        background: {C_CARD}; border: 1px solid #233152; border-radius: 16px;
-        padding: 18px 20px; margin-bottom: 18px;
-        box-shadow: 0 8px 30px rgba(0,0,0,.35);
-    }}
-    .ly-caption {{
-        font-size: 1.45rem; font-weight: 700; line-height: 1.4;
-        color: {C_TEXT}; padding: 8px 4px;
-    }}
-    .ly-caption::before {{ content: "💬 "; }}
-    .badge {{
-        display: inline-block; padding: 5px 14px; border-radius: 999px;
-        font-weight: 700; font-size: .92rem; color: #0b1222;
-    }}
-    .badge-photo   {{ background: {C_GREEN}; }}
-    .badge-nonphoto{{ background: {C_RED}; color: #fff; }}
-    .badge-default {{ background: {C_AMBER}; }}
-    .chip {{
-        display:inline-block; padding:3px 10px; border-radius:8px; margin-right:6px;
-        font-size:.82rem; background:#1d2944; color:{C_MUTED}; border:1px solid #2a3a5c;
-    }}
-    .stat-num {{ font-size: 2.4rem; font-weight: 800; color: {C_AMBER}; }}
-    .stat-lbl {{ color: {C_MUTED}; font-size: .95rem; }}
-    .status-ok   {{ color:{C_GREEN};  font-weight:700; }}
-    .status-warn {{ color:{C_AMBER};  font-weight:700; }}
-    .status-ko   {{ color:{C_RED};    font-weight:700; }}
-    .stTabs [data-baseweb="tab-list"] {{ gap: 8px; }}
-    .stTabs [data-baseweb="tab"] {{
-        background: #14203a; border-radius: 10px 10px 0 0; padding: 8px 18px;
-    }}
-    .stTabs [aria-selected="true"] {{ background: #1d2d4e; color: {C_AMBER}; }}
-    div.stButton > button {{
-        background: linear-gradient(90deg, {C_ORANGE}, {C_AMBER});
-        color:#0b1222; font-weight:800; border:0; border-radius:12px;
-        padding:.6rem 1rem; width:100%;
-    }}
-    div.stButton > button:hover {{ filter: brightness(1.08); }}
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
+# =============================================================================
+# CHEMINS  [A VERIFIER]  -> doivent matcher l'arbo de ton projet Github
+# =============================================================================
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# ---------------------------------------------------------------------------
-# CHARGEMENT DES MODELES (une seule fois)
-# ---------------------------------------------------------------------------
-@st.cache_resource(show_spinner="Chargement des modeles (TensorFlow + InceptionV3)...")
-def load_pipeline():
-    """Charge l'encodeur, le modele de captioning, le tokenizer et les modeles L1/L2.
+L1_PATH = os.path.join(BASE_DIR, "src", "models", "cnn_scratch.keras")
+# notebooks/unet_model.keras est au format Keras 3 (illisible par TF 2.10) ->
+# on pointe sur le U-Net re-enregistre nativement sous TF 2.10 (HDF5, 256x256).
+L2_PATH = os.path.join(BASE_DIR, "src", "models", "unet_denoiser_tf210.keras")
+L3_PATH = os.path.join(BASE_DIR, "src", "models", "captioning_model.keras")
+TOKENIZER_PATH = os.path.join(BASE_DIR, "src", "models", "captioning_tokenizer.pkl")
+DEMO_DIR = os.path.join(BASE_DIR, "Dataset")  # bouton "demo rapide"
 
-    Retourne un dict avec les objets et le statut de chaque etape. Defensif :
-    l'absence ou l'echec de chargement d'un modele ne fait jamais planter l'appli.
-    """
-    import pickle
+MAX_CAPTION_LEN = 17  # = tokenizer['max_len'] du notebook livrable3 (lu dynamiquement plus bas)
 
-    import tensorflow as tf
-    from tensorflow.keras.applications.inception_v3 import InceptionV3
-    from tensorflow.keras.models import Model, load_model
 
+# =============================================================================
+# THEME / CSS  --  bleu nuit + cyan glace
+# Tout le design vit ici. C'est volontairement regroupe pour rester lisible.
+# =============================================================================
+def inject_css():
+    st.markdown(
+        """
+        <style>
+        /* ---- palette ---- */
+        :root {
+            --bg-0:#0a0e1a; --bg-1:#0f1626; --bg-2:#161f33;
+            --line:#22304d; --cyan:#38e1ff; --cyan-soft:#7df0ff;
+            --txt:#e6edf7; --muted:#8aa0c2; --ok:#2ee6a6; --bad:#ff6b8a;
+            --amber:#ffb454;
+        }
+
+        /* fond global avec un leger halo cyan */
+        .stApp {
+            background:
+                radial-gradient(900px 500px at 12% -5%, rgba(56,225,255,.10), transparent 60%),
+                radial-gradient(800px 500px at 100% 0%, rgba(125,90,255,.10), transparent 55%),
+                var(--bg-0);
+            color: var(--txt);
+        }
+        .block-container { padding-top: 1.4rem; max-width: 1320px; }
+
+        /* ---------------- HERO ---------------- */
+        .hero {
+            border:1px solid var(--line);
+            border-radius:20px;
+            padding:26px 30px;
+            background:
+                linear-gradient(135deg, rgba(56,225,255,.08), rgba(125,90,255,.05)),
+                var(--bg-1);
+            box-shadow: 0 18px 50px rgba(0,0,0,.45);
+            position:relative; overflow:hidden;
+        }
+        .hero:before{
+            content:""; position:absolute; inset:0;
+            background: linear-gradient(90deg, transparent, rgba(56,225,255,.06), transparent);
+        }
+        .hero h1{
+            margin:0; font-size:2.05rem; font-weight:800; letter-spacing:.3px;
+            background:linear-gradient(90deg,#fff,var(--cyan-soft));
+            -webkit-background-clip:text; -webkit-text-fill-color:transparent;
+        }
+        .hero p{ margin:.5rem 0 0; color:var(--muted); font-size:1.02rem; max-width:760px; }
+
+        /* ---------------- PIPELINE BADGES ---------------- */
+        .flow{ display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-top:18px; }
+        .step{
+            display:flex; align-items:center; gap:8px;
+            border:1px solid var(--line); border-radius:12px;
+            padding:9px 14px; background:var(--bg-2);
+            font-weight:600; font-size:.92rem;
+            transition:.2s; white-space:nowrap;
+        }
+        .step:hover{ border-color:var(--cyan); box-shadow:0 0 0 1px rgba(56,225,255,.3); }
+        .step .dot{ width:9px; height:9px; border-radius:50%; background:var(--cyan); box-shadow:0 0 10px var(--cyan); }
+        .arrow{ color:var(--muted); font-size:1.1rem; }
+
+        /* ---------------- CARTES KPI ---------------- */
+        .kpi-grid{ display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:14px; margin:6px 0 4px; }
+        .kpi{
+            border:1px solid var(--line); border-radius:16px; padding:16px 18px;
+            background:linear-gradient(160deg,var(--bg-2),var(--bg-1));
+        }
+        .kpi .lab{ color:var(--muted); font-size:.78rem; text-transform:uppercase; letter-spacing:.6px; }
+        .kpi .val{ font-size:1.7rem; font-weight:800; margin-top:4px; }
+        .kpi .val.cyan{ color:var(--cyan); } .kpi .val.ok{ color:var(--ok); } .kpi .val.bad{ color:var(--bad); }
+
+        /* ---------------- CARTE RESULTAT ---------------- */
+        .result-card{
+            border:1px solid var(--line); border-radius:18px;
+            background:var(--bg-1); padding:18px 20px; margin-bottom:16px;
+            box-shadow:0 10px 30px rgba(0,0,0,.35);
+        }
+        .result-head{ display:flex; align-items:center; justify-content:space-between; margin-bottom:10px; }
+        .fname{ font-weight:700; font-size:1.05rem; }
+        .caption-box{
+            border-left:3px solid var(--cyan); background:var(--bg-2);
+            border-radius:0 10px 10px 0; padding:12px 16px; margin-top:6px;
+            font-size:1.05rem; font-style:italic; color:var(--txt);
+        }
+        .ts{ color:var(--muted); font-size:.82rem; margin-top:8px; }
+
+        /* badges statut */
+        .badge{ display:inline-flex; align-items:center; gap:6px; padding:5px 12px;
+                border-radius:999px; font-size:.82rem; font-weight:700; }
+        .badge.ok{ background:rgba(46,230,166,.14); color:var(--ok); border:1px solid rgba(46,230,166,.4); }
+        .badge.bad{ background:rgba(255,107,138,.14); color:var(--bad); border:1px solid rgba(255,107,138,.4); }
+        .badge.warn{ background:rgba(255,180,84,.14); color:var(--amber); border:1px solid rgba(255,180,84,.4); }
+
+        /* ---------------- SIDEBAR ---------------- */
+        section[data-testid="stSidebar"]{ background:var(--bg-1); border-right:1px solid var(--line); }
+        .side-card{ border:1px solid var(--line); border-radius:14px; background:var(--bg-2); padding:14px 16px; margin-bottom:14px; }
+        .side-title{ font-size:.75rem; text-transform:uppercase; letter-spacing:.8px; color:var(--muted); margin-bottom:10px; }
+        .model-row{ display:flex; align-items:center; justify-content:space-between; padding:7px 0; border-bottom:1px solid rgba(34,48,77,.6); }
+        .model-row:last-child{ border-bottom:none; }
+        .model-name{ font-weight:600; font-size:.92rem; }
+        .model-file{ color:var(--muted); font-size:.72rem; }
+        .pill{ font-size:.7rem; font-weight:700; padding:3px 9px; border-radius:999px; }
+        .pill.ok{ background:rgba(46,230,166,.15); color:var(--ok); }
+        .pill.bad{ background:rgba(255,107,138,.15); color:var(--bad); }
+        .pill.warn{ background:rgba(255,180,84,.15); color:var(--amber); }
+
+        /* boutons */
+        .stButton>button{
+            border-radius:12px; font-weight:700; border:1px solid var(--line);
+            padding:.55rem 1rem; transition:.18s;
+        }
+        .stButton>button[kind="primary"]{
+            background:linear-gradient(90deg,var(--cyan),#3a8bff); color:#06121f; border:none;
+            box-shadow:0 6px 20px rgba(56,225,255,.35);
+        }
+        .stButton>button[kind="primary"]:hover{ filter:brightness(1.08); transform:translateY(-1px); }
+
+        /* tabs */
+        .stTabs [data-baseweb="tab-list"]{ gap:6px; border-bottom:1px solid var(--line); }
+        .stTabs [data-baseweb="tab"]{
+            border-radius:10px 10px 0 0; padding:10px 18px; color:var(--muted); font-weight:600;
+        }
+        .stTabs [aria-selected="true"]{ color:var(--cyan); background:var(--bg-2); }
+
+        /* uploader */
+        [data-testid="stFileUploaderDropzone"]{
+            border:1.5px dashed var(--line); border-radius:16px; background:var(--bg-2);
+        }
+        [data-testid="stFileUploaderDropzone"]:hover{ border-color:var(--cyan); }
+
+        /* section title */
+        .sec{ font-size:1.25rem; font-weight:800; margin:22px 0 12px; display:flex; align-items:center; gap:10px; }
+        .sec .bar{ width:4px; height:22px; border-radius:4px; background:linear-gradient(var(--cyan),#3a8bff); }
+
+        /* arch flow vertical */
+        .arch-node{ border:1px solid var(--line); border-radius:14px; background:var(--bg-2);
+                    padding:14px 18px; margin:10px 0; }
+        .arch-node h4{ margin:0 0 4px; color:var(--cyan); }
+        .arch-node p{ margin:0; color:var(--muted); font-size:.9rem; }
+        .arch-arrow{ text-align:center; color:var(--cyan); font-size:1.3rem; margin:-2px 0; }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+# =============================================================================
+# LOGIQUE METIER  --  ne pas modifier le comportement, seulement adapter les
+# noms si besoin.  [A VERIFIER] sur chaque fonction.
+# =============================================================================
+@st.cache_resource(show_spinner=False)
+def load_models():
+    """Charge les 3 modeles une seule fois. Renvoie un dict + statut."""
     status = {}
+    models = {}
 
-    # --- GPU : croissance memoire (GTX 1050) ---
-    for g in tf.config.list_physical_devices("GPU"):
-        try:
-            tf.config.experimental.set_memory_growth(g, True)
-        except Exception:
-            pass
-
-    # --- Encodeur InceptionV3 (features 2048-d, gele) ---
-    encoder = None
+    # L1 - classification (peut etre absent)
+    # compile=False : inference uniquement, et evite d'avoir a fournir les
+    # fonctions de perte/metriques custom enregistrees dans les modeles.
     try:
-        base = InceptionV3(include_top=False, weights="imagenet", pooling="avg")
-        base.trainable = False
-        encoder = Model(base.input, base.output, name="inceptionv3_encoder")
-        encoder.trainable = False
-    except Exception as e:
-        status["encoder_err"] = str(e)
+        models["l1"] = tf.keras.models.load_model(L1_PATH, compile=False)
+        status["l1"] = ("ok", "cnn_scratch.keras")
+    except Exception:
+        models["l1"] = None
+        status["l1"] = ("warn", "absent - Photo par defaut")
 
-    # --- L3 : modele de captioning + tokenizer ---
-    caption_model, tok = None, None
-    if L3_MODEL_PATH.exists() and TOKENIZER_PKL.exists() and encoder is not None:
-        try:
-            caption_model = load_model(L3_MODEL_PATH, compile=False)
-            with open(TOKENIZER_PKL, "rb") as f:
-                tok = pickle.load(f)
-            status["L3"] = ("ok", L3_MODEL_PATH.name)
-        except Exception as e:
-            status["L3"] = ("ko", f"erreur de chargement : {e}")
-    else:
-        status["L3"] = ("ko", "modele/tokenizer/encodeur absent")
+    # L2 - debruitage (perte custom 'combined_loss_weighted' -> compile=False obligatoire)
+    try:
+        models["l2"] = tf.keras.models.load_model(L2_PATH, compile=False)
+        status["l2"] = ("ok", "unet_denoiser_tf210.keras")
+    except Exception:
+        models["l2"] = None
+        status["l2"] = ("bad", "echec de chargement")
 
-    # --- L1 : classification (optionnel) ---
-    l1_model = None
-    if L1_MODEL_PATH.exists():
-        try:
-            l1_model = load_model(L1_MODEL_PATH, compile=False)
-            status["L1"] = ("ok", L1_MODEL_PATH.name)
-        except Exception as e:
-            status["L1"] = ("warn", f"present mais non chargeable ({e}) -> Photo par defaut")
-    else:
-        status["L1"] = ("warn", "absent -> 'Photo (par defaut)'")
+    # L3 - captioning + tokenizer
+    try:
+        models["l3"] = tf.keras.models.load_model(L3_PATH, compile=False)
+        with open(TOKENIZER_PATH, "rb") as f:
+            models["tokenizer"] = pickle.load(f)
+        status["l3"] = ("ok", "captioning_model.keras")
+    except Exception:
+        models["l3"] = None
+        models["tokenizer"] = None
+        status["l3"] = ("bad", "echec de chargement")
 
-    # --- L2 : debruitage U-Net ---
-    l2_model = None
-    if L2_MODEL_PATH.exists():
-        try:
-            l2_model = load_model(L2_MODEL_PATH, compile=False)
-            status["L2"] = ("ok", L2_MODEL_PATH.name)
-        except Exception as e:
-            status["L2"] = ("warn", f"present mais non chargeable ({e}) -> L2 desactive")
-    else:
-        status["L2"] = ("warn", "absent -> L2 desactive")
+    # Encodeur InceptionV3 (features pour le captioning)
+    try:
+        base = tf.keras.applications.InceptionV3(weights="imagenet")
+        models["encoder"] = tf.keras.Model(base.input, base.layers[-2].output)
+        status["encoder"] = ("ok", "InceptionV3 (ImageNet)")
+    except Exception:
+        models["encoder"] = None
+        status["encoder"] = ("bad", "echec")
 
-    return {
-        "tf_version": tf.__version__,
-        "gpu": [g.name for g in tf.config.list_physical_devices("GPU")],
-        "encoder": encoder,
-        "caption_model": caption_model,
-        "tok": tok,
-        "l1_model": l1_model,
-        "l2_model": l2_model,
-        "status": status,
-    }
+    return models, status
 
 
-# ---------------------------------------------------------------------------
-# ETAPES DU PIPELINE (adaptees du livrable 3)
-# ---------------------------------------------------------------------------
-def generate_caption(model, feature, tok):
-    """Decodage glouton : predit le mot le plus probable jusqu'a <end>.
-    Adapte de generate_caption() du notebook livrable3_captioning.ipynb."""
-    from tensorflow.keras.preprocessing.sequence import pad_sequences
+def classify_image(models, img_array):
+    """L1 : renvoie ('Photo'|'Non-photo', confiance). Tolere l'absence du modele."""
+    if models["l1"] is None:
+        return "Photo", None  # comportement par defaut demande
+    x = tf.image.resize(img_array, (224, 224))[None] / 255.0  # entree L1 = 224x224 (cnn_scratch)
+    p = float(models["l1"].predict(x, verbose=0)[0][0])
+    label = "Photo" if p >= 0.5 else "Non-photo"
+    conf = p if p >= 0.5 else 1 - p
+    return label, conf
 
+
+def denoise_image(models, img_array):
+    """L2 : renvoie l'image debruitee en uint8, ou None si L2 absent."""
+    if models["l2"] is None:
+        return None
+    h, w = 256, 256  # entree/sortie U-Net = 256x256 (unet_denoiser_tf210)
+    x = tf.image.resize(img_array, (h, w)) / 255.0
+    out = models["l2"].predict(x[None], verbose=0)[0]
+    out = np.clip(out * 255.0, 0, 255).astype("uint8")
+    return out
+
+
+def generate_caption(models, img_array):
+    """L3 : decodage glouton, identique a generate_caption du notebook livrable3.
+
+    Le tokenizer est un dict {word2idx, idx2word, max_len, vocab_size} avec tokens
+    speciaux <start>/<end>/<pad>. On predit le mot le plus probable a chaque pas
+    jusqu'a <end>, padding 'post', longueur fixe max_len.
+    """
+    if models["l3"] is None or models["encoder"] is None or models["tokenizer"] is None:
+        return "(captioning indisponible)"
+    tok = models["tokenizer"]
     word2idx, idx2word, max_len = tok["word2idx"], tok["idx2word"], tok["max_len"]
-    seq = [word2idx[START_TOK]]
+    START, END, PAD = "<start>", "<end>", "<pad>"
+
+    # features InceptionV3 (299x299, preprocess officiel -> [-1, 1]) -> vecteur 2048-d
+    x = tf.image.resize(img_array, (299, 299))
+    x = tf.keras.applications.inception_v3.preprocess_input(x)
+    feat = models["encoder"].predict(x[None], verbose=0)  # (1, 2048)
+
+    seq = [word2idx[START]]
     for _ in range(max_len):
-        padded = pad_sequences([seq], maxlen=max_len, padding="post")
-        yhat = model.predict([feature[None, :], padded], verbose=0)
+        pad = tf.keras.preprocessing.sequence.pad_sequences(
+            [seq], maxlen=max_len, padding="post"
+        )
+        yhat = models["l3"].predict([feat, pad], verbose=0)
         nxt = int(np.argmax(yhat[0]))
-        if nxt == word2idx[END_TOK]:
+        if nxt == word2idx[END]:
             break
         seq.append(nxt)
-    words = [
-        idx2word[i]
-        for i in seq[1:]
-        if i not in (word2idx[START_TOK], word2idx[END_TOK], word2idx[PAD_TOK])
-    ]
-    return " ".join(words) if words else "(aucune legende generee)"
+
+    words = [idx2word[i] for i in seq[1:]
+             if i not in (word2idx[START], word2idx[END], word2idx[PAD])]
+    cap = " ".join(words)
+    return cap.strip().capitalize() or "(legende vide)"
 
 
-def step_classify(P, pil_img):
-    """L1 -> (label, proba, ms). Suppose 'Photo (par defaut)' si modele absent."""
-    from tensorflow.keras.preprocessing.image import img_to_array
-
-    t0 = time.perf_counter()
-    if P["l1_model"] is None:
-        return "Photo (par defaut)", None, (time.perf_counter() - t0) * 1000
-    arr = img_to_array(pil_img.resize((L1_SIZE, L1_SIZE))) / 255.0
-    p = float(P["l1_model"].predict(arr[None, ...], verbose=0).ravel()[0])
-    label = "Photo" if p >= 0.5 else "Non-Photo"
-    return label, p, (time.perf_counter() - t0) * 1000
-
-
-def step_denoise(P, pil_img):
-    """L2 -> (image debruitee, ms). Renvoie l'originale si modele absent."""
-    from tensorflow.keras.preprocessing.image import img_to_array
-
-    t0 = time.perf_counter()
-    if P["l2_model"] is None:
-        return None, (time.perf_counter() - t0) * 1000
-    arr = img_to_array(pil_img.resize((L2_SIZE, L2_SIZE))) / 255.0
-    out = P["l2_model"].predict(arr[None, ...], verbose=0)[0]
-    out = np.clip(out, 0, 1)
-    return Image.fromarray((out * 255).astype("uint8")), (time.perf_counter() - t0) * 1000
-
-
-def step_caption(P, pil_img):
-    """L3 -> (legende, ms). Extraction features InceptionV3 puis decodage."""
-    from tensorflow.keras.applications.inception_v3 import preprocess_input
-    from tensorflow.keras.preprocessing.image import img_to_array
-
-    t0 = time.perf_counter()
-    if P["caption_model"] is None or P["encoder"] is None or P["tok"] is None:
-        return "(L3 indisponible)", (time.perf_counter() - t0) * 1000
-    arr = preprocess_input(img_to_array(pil_img.resize((IMG_SIZE, IMG_SIZE))))
-    feat = P["encoder"].predict(arr[None, ...], verbose=0)[0]
-    cap = generate_caption(P["caption_model"], feat, P["tok"])
-    return cap, (time.perf_counter() - t0) * 1000
-
-
-def process_image(P, name, pil_img):
-    """Orchestration L1 -> L2 -> L3 sur une image, robuste etape par etape."""
-    res = {"name": name, "image": pil_img, "errors": []}
-
-    # L1
+def run_pipeline(models, pil_img):
+    """Enchaine L1 -> L2 -> L3 sur une image. Robuste : chaque etape en try/except."""
+    img = np.array(pil_img.convert("RGB")).astype("float32")
+    res = {"label": "?", "conf": None, "denoised": None,
+           "caption": "", "t_l1": 0, "t_l2": 0, "t_l3": 0, "error": None}
     try:
-        res["label"], res["proba"], res["t1"] = step_classify(P, pil_img)
+        t = time.time(); res["label"], res["conf"] = classify_image(models, img); res["t_l1"] = (time.time()-t)*1000
+        t = time.time(); res["denoised"] = denoise_image(models, img); res["t_l2"] = (time.time()-t)*1000
+        t = time.time(); res["caption"] = generate_caption(models, img); res["t_l3"] = (time.time()-t)*1000
     except Exception as e:
-        res["label"], res["proba"], res["t1"] = "Photo (par defaut)", None, 0.0
-        res["errors"].append(f"L1: {e}")
-
-    # L2 (l'image debruitee alimente L3 si disponible)
-    try:
-        res["denoised"], res["t2"] = step_denoise(P, pil_img)
-    except Exception as e:
-        res["denoised"], res["t2"] = None, 0.0
-        res["errors"].append(f"L2: {e}")
-
-    src_for_caption = res["denoised"] if res["denoised"] is not None else pil_img
-
-    # L3
-    try:
-        res["caption"], res["t3"] = step_caption(P, src_for_caption)
-    except Exception as e:
-        res["caption"], res["t3"] = "(echec L3 sur cette image)", 0.0
-        res["errors"].append(f"L3: {e}")
-
+        res["error"] = str(e)
     return res
 
 
-# ---------------------------------------------------------------------------
-# RENDU D'UNE CARTE RESULTAT
-# ---------------------------------------------------------------------------
-def badge_html(label):
-    if label.startswith("Photo (par"):
-        return f'<span class="badge badge-default">⚠️ {label}</span>'
-    if label == "Photo":
-        return f'<span class="badge badge-photo">✅ Photo</span>'
-    return f'<span class="badge badge-nonphoto">⛔ {label}</span>'
+# =============================================================================
+# RENDU UI
+# =============================================================================
+def render_hero():
+    st.markdown(
+        """
+        <div class="hero">
+            <h1>🛰️ Projet Leyenda — Pipeline TouNum</h1>
+            <p>Numérisation intelligente : chaque image traverse une chaîne IA en
+            trois temps — tri photo/non-photo, restauration par débruitage, puis
+            génération automatique d'une légende descriptive.</p>
+            <div class="flow">
+                <div class="step"><span class="dot"></span>🖼️ Image</div>
+                <span class="arrow">→</span>
+                <div class="step"><span class="dot"></span>🔍 L1 · Classification</div>
+                <span class="arrow">→</span>
+                <div class="step"><span class="dot"></span>🧹 L2 · Débruitage</div>
+                <span class="arrow">→</span>
+                <div class="step"><span class="dot"></span>💬 L3 · Légende</div>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
-def render_card(res):
-    st.markdown('<div class="ly-card">', unsafe_allow_html=True)
-    st.markdown(f"#### 🖼️ {res['name']}")
+def render_sidebar(status, models):
+    with st.sidebar:
+        st.markdown(
+            """
+            <div style="text-align:center; padding:6px 0 14px;">
+                <div style="font-size:2.4rem;">🏛️</div>
+                <div style="font-weight:800; letter-spacing:.5px;">CESI · Groupe 2</div>
+                <div style="color:#8aa0c2; font-size:.82rem;">Projet TouNum · Leyenda</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
-    col_o, col_d = st.columns(2)
-    with col_o:
-        st.markdown("**Originale**")
-        st.image(res["image"], use_container_width=True)
-    with col_d:
+        # statut modeles
+        rows = ""
+        meta = {"l1": "L1 · Classification", "l2": "L2 · Débruitage",
+                "l3": "L3 · Captioning", "encoder": "Encodeur"}
+        for key, title in meta.items():
+            state, label = status.get(key, ("bad", "?"))
+            pill_txt = {"ok": "OK", "warn": "DÉFAUT", "bad": "ABSENT"}[state]
+            rows += f"""
+            <div class="model-row">
+                <div>
+                    <div class="model-name">{title}</div>
+                    <div class="model-file">{label}</div>
+                </div>
+                <span class="pill {state}">{pill_txt}</span>
+            </div>"""
+        st.markdown(
+            f'<div class="side-card"><div class="side-title">⚙️ Statut des modèles</div>{rows}</div>',
+            unsafe_allow_html=True,
+        )
+
+        # backend
+        gpu = "✅" if tf.config.list_physical_devices("GPU") else "—"
+        st.markdown(
+            f'<div class="side-card"><div class="side-title">🧩 Environnement</div>'
+            f'<div class="model-row"><span class="model-name">TensorFlow</span>'
+            f'<span class="pill ok">{tf.__version__}</span></div>'
+            f'<div class="model-row"><span class="model-name">GPU</span>'
+            f'<span class="pill {"ok" if gpu=="✅" else "warn"}">{gpu}</span></div></div>',
+            unsafe_allow_html=True,
+        )
+
+        # parametres
+        st.markdown('<div class="side-title">🎚️ Paramètres</div>', unsafe_allow_html=True)
+        n = st.slider("Nombre d'images à traiter", 1, 50, 4)
+
+        st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+        launch = st.button("🚀 Lancer le pipeline", use_container_width=True, type="primary")
+        demo = st.button("📂 Démo rapide (dossier Dataset/)", use_container_width=True)
+        reset = st.button("🗑️ Réinitialiser", use_container_width=True)
+
+        return n, launch, demo, reset
+
+
+def render_kpis(results):
+    photos = sum(1 for r in results if r["label"] == "Photo")
+    non = sum(1 for r in results if r["label"] == "Non-photo")
+    avg = np.mean([r["t_l1"] + r["t_l2"] + r["t_l3"] for r in results]) if results else 0
+    total = sum(r["t_l1"] + r["t_l2"] + r["t_l3"] for r in results) / 1000
+    st.markdown(
+        f"""
+        <div class="kpi-grid">
+            <div class="kpi"><div class="lab">Images</div><div class="val cyan">{len(results)}</div></div>
+            <div class="kpi"><div class="lab">Photos</div><div class="val ok">{photos}</div></div>
+            <div class="kpi"><div class="lab">Non-photos</div><div class="val bad">{non}</div></div>
+            <div class="kpi"><div class="lab">Moy. / image</div><div class="val">{avg:.0f} ms</div></div>
+            <div class="kpi"><div class="lab">Temps total</div><div class="val">{total:.1f} s</div></div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_result_card(name, pil_img, res):
+    badge = ('<span class="badge bad">🚫 Non-photo</span>'
+             if res["label"] == "Non-photo"
+             else '<span class="badge ok">✅ Photo</span>')
+    conf = f" · {res['conf']*100:.0f}%" if res["conf"] is not None else ""
+
+    st.markdown('<div class="result-card">', unsafe_allow_html=True)
+    st.markdown(
+        f'<div class="result-head"><div class="fname">🖼️ {name}</div>{badge}</div>',
+        unsafe_allow_html=True,
+    )
+
+    c1, c2 = st.columns(2)
+    with c1:
+        st.image(pil_img, caption="Originale", use_container_width=True)
+    with c2:
         if res["denoised"] is not None:
-            st.markdown("**🧹 Debruitee (L2)**")
-            st.image(res["denoised"], use_container_width=True)
+            st.image(res["denoised"], caption="Débruitée (L2)", use_container_width=True)
         else:
-            st.markdown("**🧹 Debruitage (L2)**")
-            st.info("L2 desactive - image originale utilisee pour la suite.")
+            st.info("L2 désactivé pour cette image.")
 
-    proba_txt = f" &nbsp; <span class='chip'>p = {res['proba']:.2f}</span>" if res.get("proba") is not None else ""
+    st.markdown(f'<div class="caption-box">💬 « {res["caption"]} »{conf}</div>',
+                unsafe_allow_html=True)
     st.markdown(
-        f"<div style='margin:10px 0;'>🔍 <b>Classification L1 :</b> {badge_html(res['label'])}{proba_txt}</div>",
+        f'<div class="ts">⏱️ L1 {res["t_l1"]:.0f} ms · L2 {res["t_l2"]:.0f} ms · '
+        f'L3 {res["t_l3"]:.0f} ms</div>',
         unsafe_allow_html=True,
     )
-    st.markdown(f"<div class='ly-caption'>{res['caption']}</div>", unsafe_allow_html=True)
-
-    st.markdown(
-        f"<div style='margin-top:8px;'>"
-        f"<span class='chip'>L1 : {res['t1']:.0f} ms</span>"
-        f"<span class='chip'>L2 : {res['t2']:.0f} ms</span>"
-        f"<span class='chip'>L3 : {res['t3']:.0f} ms</span>"
-        f"<span class='chip'>Total : {res['t1']+res['t2']+res['t3']:.0f} ms</span>"
-        f"</div>",
-        unsafe_allow_html=True,
-    )
-    if res["errors"]:
-        st.warning("Avertissements : " + " | ".join(res["errors"]))
+    if res["error"]:
+        st.error(f"Erreur : {res['error']}")
     st.markdown("</div>", unsafe_allow_html=True)
 
 
-# ---------------------------------------------------------------------------
-# COLLECTE DES IMAGES (upload + dossier)
-# ---------------------------------------------------------------------------
-def gather_images(uploaded_files, folder_str, limit):
-    """Retourne une liste de (nom, PIL.Image) a partir des uploads et/ou d'un dossier."""
-    items = []
-    if uploaded_files:
-        for uf in uploaded_files:
-            try:
-                items.append((uf.name, Image.open(io.BytesIO(uf.getvalue())).convert("RGB")))
-            except Exception:
-                pass
-    if folder_str:
-        folder = Path(folder_str.strip().strip('"'))
-        if folder.is_dir():
-            files = sorted(p for p in folder.iterdir() if p.suffix.lower() in EXTS)
-            for p in files:
+def build_csv(results, names):
+    import csv
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(["fichier", "classe", "confiance", "legende", "t_l1_ms", "t_l2_ms", "t_l3_ms"])
+    for n, r in zip(names, results):
+        w.writerow([n, r["label"], f"{(r['conf'] or 0):.3f}", r["caption"],
+                    f"{r['t_l1']:.0f}", f"{r['t_l2']:.0f}", f"{r['t_l3']:.0f}"])
+    return buf.getvalue().encode("utf-8")
+
+
+# =============================================================================
+# MAIN
+# =============================================================================
+def main():
+    inject_css()
+
+    if "results" not in st.session_state:
+        st.session_state.results = []
+        st.session_state.names = []
+        st.session_state.images = []
+
+    models, status = load_models()
+    n_max, launch, demo, reset = render_sidebar(status, models)
+
+    if reset:
+        st.session_state.results, st.session_state.names, st.session_state.images = [], [], []
+
+    render_hero()
+
+    tab_pipe, tab_stats, tab_arch = st.tabs(["🔬 Pipeline", "📊 Statistiques", "🏗️ Architecture"])
+
+    # ----------------------------- PIPELINE -----------------------------
+    with tab_pipe:
+        st.markdown('<div class="sec"><span class="bar"></span>📥 Sélection des images</div>',
+                    unsafe_allow_html=True)
+
+        uploaded = st.file_uploader(
+            "Glissez-déposez vos images (sélection multiple)",
+            type=["jpg", "jpeg", "png", "bmp", "gif", "tif", "tiff", "webp"],
+            accept_multiple_files=True,
+        )
+        folder = st.text_input(
+            "…ou indiquez le chemin d'un dossier d'images (sur cette machine)",
+            placeholder=r"C:\Users\matis\Desktop\dataset_prof",
+        )
+
+        # collecte des sources
+        sources = []  # (nom, PIL.Image)
+        if uploaded:
+            for f in uploaded[:n_max]:
                 try:
-                    items.append((p.name, Image.open(p).convert("RGB")))
+                    sources.append((f.name, Image.open(f)))
                 except Exception:
                     pass
-    return items[:limit]
+        if (demo or folder) and not uploaded:
+            target = folder.strip() or DEMO_DIR
+            if os.path.isdir(target):
+                files = [x for x in sorted(os.listdir(target))
+                         if x.lower().endswith((".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp"))]
+                for fn in files[:n_max]:
+                    try:
+                        sources.append((fn, Image.open(os.path.join(target, fn))))
+                    except Exception:
+                        pass
+            else:
+                st.warning(f"Dossier introuvable : {target}")
 
+        if sources:
+            st.success(f"{len(sources)} image(s) prête(s) à être traitée(s).")
 
-# ===========================================================================
-# INTERFACE
-# ===========================================================================
-P = load_pipeline()
-status = P["status"]
+        # lancement
+        if (launch or demo) and sources:
+            prog = st.progress(0, text="Initialisation du pipeline…")
+            results, names, images = [], [], []
+            for i, (name, img) in enumerate(sources):
+                prog.progress((i) / len(sources), text=f"Traitement de {name} ({i+1}/{len(sources)})")
+                results.append(run_pipeline(models, img))
+                names.append(name)
+                images.append(img)
+            prog.progress(1.0, text="Terminé ✅")
+            time.sleep(0.3); prog.empty()
+            st.session_state.results, st.session_state.names, st.session_state.images = results, names, images
 
-# --- En-tete ---
-st.markdown('<div class="ly-title">Projet Leyenda — Pipeline TouNum</div>', unsafe_allow_html=True)
-st.markdown(
-    '<p class="ly-sub">Numerisation intelligente : classification (L1) · débruitage (L2) · '
-    'génération de légende (L3) — démonstration live sur des images inconnues.</p>',
-    unsafe_allow_html=True,
-)
+        # affichage resultats
+        if st.session_state.results:
+            st.markdown('<div class="sec"><span class="bar"></span>📈 Synthèse</div>',
+                        unsafe_allow_html=True)
+            render_kpis(st.session_state.results)
 
-# --- Barre laterale ---
-with st.sidebar:
-    st.markdown("<div style='font-size:3rem; text-align:center;'>🏛️</div>", unsafe_allow_html=True)
-    st.markdown("<div style='text-align:center; color:#8a97ad;'>CESI · Groupe 2 · TouNum</div>", unsafe_allow_html=True)
-    st.markdown("---")
-    st.markdown("### Statut des modèles")
-
-    def show_status(stage, label):
-        kind, msg = status.get(stage, ("ko", "inconnu"))
-        icon = {"ok": "✅", "warn": "⚠️", "ko": "❌"}[kind]
-        cls = {"ok": "status-ok", "warn": "status-warn", "ko": "status-ko"}[kind]
-        st.markdown(
-            f"<div><span class='{cls}'>{icon} {label}</span><br>"
-            f"<span style='color:#8a97ad; font-size:.82rem;'>{msg}</span></div>",
-            unsafe_allow_html=True,
-        )
-
-    show_status("L1", "L1 · Classification")
-    show_status("L2", "L2 · Débruitage")
-    show_status("L3", "L3 · Captioning")
-
-    st.markdown("---")
-    st.markdown(f"<span class='chip'>TF {P['tf_version']}</span>"
-                f"<span class='chip'>{'GPU ✅' if P['gpu'] else 'CPU'}</span>",
-                unsafe_allow_html=True)
-    st.markdown("---")
-
-    n_images = st.slider("Nombre d'images à traiter", 1, 50, 8)
-    run = st.button("🚀 Lancer le pipeline")
-
-# --- Onglets ---
-tab_pipe, tab_stats, tab_arch = st.tabs(["🔍 Pipeline", "📊 Statistiques", "🏗️ Architecture"])
-
-# ============================ ONGLET PIPELINE ==============================
-with tab_pipe:
-    st.markdown("#### 🖼️ Sélection des images")
-    uploaded = st.file_uploader(
-        "Glissez-déposez vos images ici (sélection multiple)",
-        type=[e.strip(".") for e in EXTS],
-        accept_multiple_files=True,
-    )
-    folder_str = st.text_input(
-        "…ou indiquez le chemin d'un dossier d'images (sur cette machine)",
-        placeholder=r"C:\Users\matis\Desktop\dataset_prof",
-    )
-
-    if run:
-        items = gather_images(uploaded, folder_str, n_images)
-        if not items:
-            st.error("Aucune image trouvée. Uploadez des fichiers ou indiquez un dossier valide.")
-        else:
-            st.success(f"{len(items)} image(s) à traiter.")
-            results = []
-            progress = st.progress(0.0, text="Traitement en cours…")
-            for i, (name, img) in enumerate(items):
-                with st.spinner(f"Pipeline sur « {name} » ({i+1}/{len(items)})…"):
-                    results.append(process_image(P, name, img))
-                progress.progress((i + 1) / len(items), text=f"{i+1}/{len(items)} traitées")
-            progress.empty()
-            st.session_state["results"] = results
-
-    results = st.session_state.get("results", [])
-    if results:
-        st.markdown(f"### Résultats ({len(results)})")
-        for res in results:
-            render_card(res)
-    elif not run:
-        st.info("Chargez des images puis cliquez sur **🚀 Lancer le pipeline** dans la barre latérale.")
-
-# ============================ ONGLET STATISTIQUES ==========================
-with tab_stats:
-    results = st.session_state.get("results", [])
-    st.markdown("#### 📊 Statistiques de la dernière exécution")
-    if not results:
-        st.info("Aucune exécution pour le moment.")
-    else:
-        n_photo = sum(1 for r in results if r["label"] == "Photo" or r["label"].startswith("Photo (par"))
-        n_nonphoto = sum(1 for r in results if r["label"] == "Non-Photo")
-        avg_total = np.mean([r["t1"] + r["t2"] + r["t3"] for r in results])
-        avg_l3 = np.mean([r["t3"] for r in results])
-
-        c1, c2, c3, c4 = st.columns(4)
-        for col, num, lbl in [
-            (c1, len(results), "Images traitées"),
-            (c2, n_photo, "Photos"),
-            (c3, n_nonphoto, "Non-Photos"),
-            (c4, f"{avg_total:.0f} ms", "Temps moyen / image"),
-        ]:
-            col.markdown(
-                f"<div class='ly-card' style='text-align:center;'>"
-                f"<div class='stat-num'>{num}</div><div class='stat-lbl'>{lbl}</div></div>",
-                unsafe_allow_html=True,
+            st.download_button(
+                "⬇️ Télécharger les résultats (CSV)",
+                data=build_csv(st.session_state.results, st.session_state.names),
+                file_name="resultats_leyenda.csv",
+                mime="text/csv",
+                use_container_width=False,
             )
 
-        st.markdown("##### Détail des temps par étape (ms)")
-        import pandas as pd
+            st.markdown(
+                f'<div class="sec"><span class="bar"></span>🗂️ Résultats ({len(st.session_state.results)})</div>',
+                unsafe_allow_html=True,
+            )
+            for name, img, res in zip(st.session_state.names,
+                                      st.session_state.images,
+                                      st.session_state.results):
+                render_result_card(name, img, res)
+        else:
+            st.info("Importez des images puis cliquez sur **Lancer le pipeline** dans le panneau de gauche.")
 
-        df_stats = pd.DataFrame(
-            [{"Image": r["name"], "Classe": r["label"],
-              "L1 (ms)": round(r["t1"]), "L2 (ms)": round(r["t2"]),
-              "L3 (ms)": round(r["t3"]),
-              "Total (ms)": round(r["t1"] + r["t2"] + r["t3"])}
-             for r in results]
-        )
-        st.dataframe(df_stats, use_container_width=True, hide_index=True)
-        st.markdown(f"<span class='chip'>Temps moyen L3 : {avg_l3:.0f} ms</span>", unsafe_allow_html=True)
+    # ----------------------------- STATISTIQUES -----------------------------
+    with tab_stats:
+        st.markdown('<div class="sec"><span class="bar"></span>📊 Statistiques de la session</div>',
+                    unsafe_allow_html=True)
+        res = st.session_state.results
+        if not res:
+            st.info("Aucune donnée pour l'instant — lancez d'abord le pipeline.")
+        else:
+            render_kpis(res)
+            st.markdown("##### Répartition des temps par étape (moyenne)")
+            avg_l1 = np.mean([r["t_l1"] for r in res])
+            avg_l2 = np.mean([r["t_l2"] for r in res])
+            avg_l3 = np.mean([r["t_l3"] for r in res])
+            st.bar_chart({"L1 Classification": [avg_l1],
+                          "L2 Débruitage": [avg_l2],
+                          "L3 Captioning": [avg_l3]})
+            st.caption("Temps moyen de traitement par étape, en millisecondes.")
 
-# ============================ ONGLET ARCHITECTURE ==========================
-with tab_arch:
-    st.markdown("#### 🏗️ Architecture du pipeline TouNum")
-    st.markdown(
-        """
-```
-   Image inconnue
-        │
-        ▼
-┌──────────────────┐   L1 · Classification (CNN from scratch)
-│  PHOTO / NON-PHOTO │   src/models/cnn_scratch.keras
-└──────────────────┘   → Photo (par défaut) si absent
-        │
-        ▼
-┌──────────────────┐   L2 · Débruitage (U-Net, MSE+SSIM)
-│   IMAGE NETTOYÉE  │   notebooks/unet_model.keras
-└──────────────────┘   → image originale si désactivé
-        │
-        ▼
-┌──────────────────┐   L3 · Captioning (InceptionV3 → LSTM)
-│  LÉGENDE GÉNÉRÉE  │   src/models/captioning_model.keras
-└──────────────────┘   + tokenizer (vocab 5000)
-        │
-        ▼
-   « a man riding a wave on a surfboard »
-```
-        """
-    )
-
-    st.markdown("##### Détails techniques")
-    cA, cB, cC = st.columns(3)
-    with cA:
+    # ----------------------------- ARCHITECTURE -----------------------------
+    with tab_arch:
+        st.markdown('<div class="sec"><span class="bar"></span>🏗️ Architecture du pipeline</div>',
+                    unsafe_allow_html=True)
         st.markdown(
-            f"<div class='ly-card'><b>🔍 L1 · Classification</b><br>"
-            f"<span class='stat-lbl'>CNN entraîné from scratch.<br>"
-            f"Entrée 224×224, sortie binaire (Photo / Non-Photo).<br>"
-            f"Statut : {status['L1'][0].upper()}</span></div>",
-            unsafe_allow_html=True,
-        )
-    with cB:
-        st.markdown(
-            f"<div class='ly-card'><b>🧹 L2 · Débruitage</b><br>"
-            f"<span class='stat-lbl'>U-Net convolutif, perte MSE+SSIM.<br>"
-            f"Entrée/sortie 256×256 RGB.<br>"
-            f"Statut : {status['L2'][0].upper()}</span></div>",
-            unsafe_allow_html=True,
-        )
-    with cC:
-        st.markdown(
-            f"<div class='ly-card'><b>💬 L3 · Captioning</b><br>"
-            f"<span class='stat-lbl'>Encodeur InceptionV3 (2048-d, gelé) +<br>"
-            f"décodeur LSTM par fusion. Vocab 5000, décodage glouton.<br>"
-            f"Statut : {status['L3'][0].upper()}</span></div>",
+            """
+            <div class="arch-node"><h4>① Image d'entrée</h4>
+                <p>Chargement RGB, normalisation unique [0,1]. Compatible JPG/PNG/TIFF.</p></div>
+            <div class="arch-arrow">▼</div>
+            <div class="arch-node"><h4>② L1 · Classification (CNN)</h4>
+                <p>CNN entraîné from scratch. Tri binaire photo / non-photo (schémas, textes, peintures).</p></div>
+            <div class="arch-arrow">▼</div>
+            <div class="arch-node"><h4>③ L2 · Débruitage (auto-encodeur U-Net)</h4>
+                <p>Auto-encodeur convolutif type U-Net. Restaure les images bruitées avant analyse.</p></div>
+            <div class="arch-arrow">▼</div>
+            <div class="arch-node"><h4>④ L3 · Captioning (CNN + RNN)</h4>
+                <p>Encodeur InceptionV3 (transfer learning, ImageNet) → features. Décodeur RNN entraîné sur
+                MS COCO génère la légende mot à mot (décodage glouton).</p></div>
+            <div class="arch-arrow">▼</div>
+            <div class="arch-node"><h4>⑤ Légende descriptive</h4>
+                <p>Sortie textuelle finale, exportable en CSV avec les temps de traitement.</p></div>
+            """,
             unsafe_allow_html=True,
         )
 
-    st.markdown("##### Environnement")
-    st.markdown(
-        f"<span class='chip'>TensorFlow {P['tf_version']}</span>"
-        f"<span class='chip'>{'GPU : ' + P['gpu'][0] if P['gpu'] else 'CPU uniquement'}</span>"
-        f"<span class='chip'>Encodeur : InceptionV3 / ImageNet</span>",
-        unsafe_allow_html=True,
-    )
+
+if __name__ == "__main__":
+    main()

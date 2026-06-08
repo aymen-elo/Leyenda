@@ -1,0 +1,12 @@
+# Theme TouNum (bleu nuit + accent ambre) applique a toute l'interface,
+# y compris les composants natifs Streamlit (metrics, tableaux, graphiques).
+[theme]
+base = "dark"
+primaryColor = "#f5a623"
+backgroundColor = "#0e1525"
+secondaryBackgroundColor = "#161f33"
+textColor = "#e8edf6"
+font = "sans serif"
+
+[browser]
+gatherUsageStats = false
